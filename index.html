@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Incidents Dashboard</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --text-2: #64748b;
+      --text-3: #94a3b8;
+      --positive: #10b981;
+      --negative: #ef4444;
+      --chip-bg: #f1f5f9;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: Inter, system-ui, -apple-system, sans-serif;
+      background-color: var(--bg);
+      min-height: 100vh;
+      padding: 32px 40px;
+      color: var(--text);
+    }
+    .container { max-width: 1280px; margin: 0 auto; }
+    .card {
+      background-color: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 3px rgba(15, 23, 42, 0.02);
+    }
+    .header-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+    .eyebrow {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-3);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .title {
+      font-size: 28px;
+      font-weight: 700;
+      margin: 0;
+      color: var(--text);
+      letter-spacing: -0.02em;
+    }
+    .date-range {
+      font-size: 14px;
+      color: var(--text-2);
+      margin-top: 4px;
+    }
+    .chips {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 14px;
+      border-radius: 999px;
+      background-color: var(--chip-bg);
+      border: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .chip-label { color: var(--text-2); font-weight: 500; }
+    .chip-value { color: var(--text); font-weight: 600; }
+    .kpi-row {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+    }
+    .kpi {
+      padding: 20px 22px;
+      flex: 1;
+      min-width: 200px;
+    }
+    .kpi-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-3);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+    .kpi-value {
+      font-size: 32px;
+      font-weight: 700;
+      color: var(--text);
+      line-height: 1.05;
+      letter-spacing: -0.02em;
+    }
+    .kpi-sub {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-2);
+      margin-top: 8px;
+    }
+    .kpi-sub.positive { color: var(--positive); }
+    .kpi-sub.negative { color: var(--negative); }
+    .chart-card { padding: 24px 28px; }
+    .chart-title {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text);
+      letter-spacing: -0.01em;
+    }
+    .chart-desc {
+      margin: 4px 0 0 0;
+      font-size: 13px;
+      color: var(--text-2);
+      max-width: 640px;
+    }
+    #chart { margin-top: 8px; }
+    .status-message {
+      padding: 80px 20px;
+      text-align: center;
+      color: var(--text-2);
+      font-size: 14px;
+    }
+    .status-message.error { color: var(--negative); }
+    .status-message code {
+      background: var(--chip-bg);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: ui-monospace, Menlo, Monaco, monospace;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div id="dashboard">
+      <div class="status-message">Loading data&hellip;</div>
+    </div>
+  </div>
+  <script>
+    // ============================================================
+    // Configuration — change this if your CSV file has a different name.
+    // The file must live next to this index.html in the same folder of the repo.
+    // ============================================================
+    const CSV_FILENAME = 'raw.cleaned.csv';
+
+    // Modern, cohesive color palette (matches original Dash app).
+    const COLOR_MAP = {
+      'Resolved': '#10b981',
+      'Closed': '#059669',
+      'Assigned': '#3b82f6',
+      'Pending Assignment': '#8b5cf6',
+      'Pending Client Response': '#ec4899',
+      'Open': '#f59e0b',
+      'On Hold': '#94a3b8',
+      'Work in Progress': '#ef4444'
+    };
+    const LINE_COLOR = '#0f172a';
+    const PREFERRED_ORDER = [
+      'Closed', 'Resolved',
+      'Assigned', 'Work in Progress',
+      'Pending Assignment', 'Pending Client Response',
+      'Open', 'On Hold'
+    ];
+
+    const root = document.getElementById('dashboard');
+    function showError(html) {
+      root.innerHTML = '<div class="status-message error">' + html + '</div>';
+    }
+
+    // ============================================================
+    // Date helpers — "naive NY-time" Date objects.
+    //
+    // Mirrors pandas: pd.to_datetime(...).dt.tz_convert('America/New_York').dt.tz_localize(None)
+    // We want a Date whose UTC components match NY wall-clock time, so comparisons
+    // and bucketing work consistently regardless of the viewer's timezone.
+    // ============================================================
+    function parseToNYNaive(str) {
+      if (str === null || str === undefined) return null;
+      const trimmed = String(str).trim();
+      if (!trimmed) return null;
+      // Normalize "YYYY-MM-DD HH:MM:SS ±HHMM" (the format this CSV uses) into
+      // strict ISO 8601 so Safari/Firefox parse it the same as Chrome.
+      const normalized = trimmed
+        .replace(' ', 'T')
+        .replace(/\s*([+-]\d{2})(\d{2})$/, '$1:$2');
+      const d = new Date(normalized);
+      if (isNaN(d.getTime())) return null;
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hour12: false
+      }).formatToParts(d);
+      const m = {};
+      for (const p of parts) m[p.type] = p.value;
+      let hour = parseInt(m.hour, 10);
+      if (hour === 24) hour = 0; // some browsers return '24' for midnight
+      return new Date(Date.UTC(
+        parseInt(m.year, 10),
+        parseInt(m.month, 10) - 1,
+        parseInt(m.day, 10),
+        hour,
+        parseInt(m.minute, 10),
+        parseInt(m.second, 10)
+      ));
+    }
+
+    function dateOnly(d) {
+      return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+    }
+
+    function startOfBucket(d, freq) {
+      const dt = new Date(d);
+      if (freq === 'D') {
+        return new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate()));
+      }
+      if (freq === 'W') {
+        // Mon–Sun weeks (matches pandas default 'W' / W-SUN start_time = Monday).
+        const day = dt.getUTCDay(); // 0 = Sunday
+        const diff = day === 0 ? 6 : day - 1;
+        return new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate() - diff));
+      }
+      // 'M'
+      return new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), 1));
+    }
+
+    function endOfBucket(d, freq) {
+      const dt = new Date(d);
+      let endExclusive;
+      if (freq === 'D') {
+        endExclusive = new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate() + 1));
+      } else if (freq === 'W') {
+        endExclusive = new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate() + 7));
+      } else {
+        endExclusive = new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth() + 1, 1));
+      }
+      return new Date(endExclusive.getTime() - 1);
+    }
+
+    function nextBucket(d, freq) {
+      const dt = new Date(d);
+      if (freq === 'D') return new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate() + 1));
+      if (freq === 'W') return new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate() + 7));
+      return new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth() + 1, 1));
+    }
+
+    function formatDateOnly(d) {
+      const yr = d.getUTCFullYear();
+      const mo = String(d.getUTCMonth() + 1).padStart(2, '0');
+      const da = String(d.getUTCDate()).padStart(2, '0');
+      return yr + '-' + mo + '-' + da;
+    }
+
+    const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    function formatMonDay(d) {
+      return MONTH_ABBR[d.getUTCMonth()] + ' ' + d.getUTCDate();
+    }
+    function formatMonDayYear(d) {
+      return MONTH_ABBR[d.getUTCMonth()] + ' ' + d.getUTCDate() + ', ' + d.getUTCFullYear();
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, function (c) {
+        return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
+      });
+    }
+
+    // ============================================================
+    // Load CSV and render
+    // ============================================================
+    Papa.parse(CSV_FILENAME, {
+      download: true,
+      header: true,
+      skipEmptyLines: true,
+      complete: function (results) {
+        try {
+          render(results.data);
+        } catch (err) {
+          console.error(err);
+          showError('Something went wrong while building the dashboard: <code>' + escapeHtml(err.message) + '</code>');
+        }
+      },
+      error: function (err) {
+        showError(
+          'Could not load <code>' + escapeHtml(CSV_FILENAME) + '</code>. ' +
+          'Make sure the file is in the same folder as this page, and that the page is being served over http(s) (GitHub Pages or a local server) &mdash; opening this file via <code>file://</code> will not work due to browser CORS rules.' +
+          '<br><br>Details: ' + escapeHtml(err.message || String(err))
+        );
+      }
+    });
+
+    function render(rows) {
+      // CSV is a present-day snapshot: each row's State is its current state
+      // and createdAt is the only reliable timestamp. We deliberately ignore
+      // Resolved At / Closed At because they can pre-date a reopen.
+      const incidents = rows.map(function (row) {
+        return {
+          state: row['State'] ? String(row['State']).trim() : '',
+          createdAt: parseToNYNaive(row['Created At'])
+        };
+      }).filter(function (r) { return r.createdAt !== null; });
+
+      if (incidents.length === 0) {
+        showError('No usable rows found in <code>' + escapeHtml(CSV_FILENAME) + '</code>.');
+        return;
+      }
+
+      incidents.forEach(function (r) { r.createdDate = dateOnly(r.createdAt); });
+
+      // Date range
+      let minTs = Infinity, maxTs = -Infinity;
+      for (const r of incidents) {
+        const t = r.createdDate.getTime();
+        if (t < minTs) minTs = t;
+        if (t > maxTs) maxTs = t;
+      }
+      const minDate = new Date(minTs);
+      const maxDate = new Date(maxTs);
+      const numDays = Math.round((maxDate.getTime() - minDate.getTime()) / 86400000) + 1;
+
+      let freq, bucketLabel, tickFormat;
+      if (numDays <= 31) {
+        freq = 'D'; bucketLabel = 'Day'; tickFormat = '%b %d';
+      } else if (numDays <= 180) {
+        freq = 'W'; bucketLabel = 'Week'; tickFormat = '%b %d';
+      } else {
+        freq = 'M'; bucketLabel = 'Month'; tickFormat = '%b %Y';
+      }
+
+      // Bucket starts/ends
+      const bucketStarts = [];
+      const bucketEnds = [];
+      const lastBucket = startOfBucket(maxDate, freq);
+      let cur = startOfBucket(minDate, freq);
+      while (cur.getTime() <= lastBucket.getTime()) {
+        bucketStarts.push(new Date(cur));
+        bucketEnds.push(endOfBucket(cur, freq));
+        cur = nextBucket(cur, freq);
+      }
+
+      const bucketIdxByTime = {};
+      bucketStarts.forEach(function (b, i) { bucketIdxByTime[b.getTime()] = i; });
+
+      // Bar data: state -> array of counts per bucket
+      const stateSet = new Set();
+      for (const r of incidents) {
+        if (r.state) stateSet.add(r.state);
+      }
+      const barData = {};
+      stateSet.forEach(function (s) { barData[s] = bucketStarts.map(function () { return 0; }); });
+
+      for (const r of incidents) {
+        if (!r.state) continue;
+        const bucket = startOfBucket(r.createdDate, freq);
+        const idx = bucketIdxByTime[bucket.getTime()];
+        if (idx !== undefined) barData[r.state][idx]++;
+      }
+
+      // Open backlog at end of each bucket — pure state projection:
+      // count incidents created by then whose CURRENT state is non-terminal.
+      const TERMINAL_STATES = new Set(['Closed', 'Resolved']);
+      const totalOpen = bucketEnds.map(function (end) {
+        const endTs = end.getTime();
+        let count = 0;
+        for (const r of incidents) {
+          if (r.createdAt.getTime() > endTs) continue;
+          if (TERMINAL_STATES.has(r.state)) continue;
+          count++;
+        }
+        return count;
+      });
+
+      // KPIs
+      const totalCreated = incidents.length;
+      const periodStart = new Date(Date.UTC(minDate.getUTCFullYear(), minDate.getUTCMonth(), minDate.getUTCDate()));
+      const periodEnd = new Date(Date.UTC(maxDate.getUTCFullYear(), maxDate.getUTCMonth(), maxDate.getUTCDate(), 23, 59, 59, 999));
+      const psTs = periodStart.getTime();
+      const peTs = periodEnd.getTime();
+      // "Resolved" KPI — of incidents created in the period, how many are
+      // currently in a terminal state (Closed or Resolved).
+      let resolvedInPeriod = 0;
+      for (const r of incidents) {
+        if (!TERMINAL_STATES.has(r.state)) continue;
+        const t = r.createdAt.getTime();
+        if (t >= psTs && t <= peTs) resolvedInPeriod++;
+      }
+      const currentOpen = totalOpen.length ? totalOpen[totalOpen.length - 1] : 0;
+      const prevOpen = totalOpen.length ? totalOpen[0] : 0;
+      const openDelta = currentOpen - prevOpen;
+      const avgDaily = (totalCreated && numDays) ? totalCreated / numDays : 0;
+      const resolutionRate = totalCreated ? (resolvedInPeriod / totalCreated * 100) : 0;
+
+      // State ordering — terminal at base, active on top
+      const orderedStates = [];
+      for (const s of PREFERRED_ORDER) {
+        if (stateSet.has(s)) orderedStates.push(s);
+      }
+      stateSet.forEach(function (s) {
+        if (orderedStates.indexOf(s) === -1) orderedStates.push(s);
+      });
+
+      // Delta text + color — label matches the chart's bucket so the wording
+      // is honest about what we're comparing against.
+      const firstBucket = bucketStarts[0];
+      let sinceLabel;
+      if (freq === 'D') {
+        sinceLabel = 'since ' + formatMonDay(firstBucket);
+      } else if (freq === 'W') {
+        sinceLabel = 'since week of ' + formatMonDay(firstBucket);
+      } else {
+        sinceLabel = 'since ' + MONTH_ABBR[firstBucket.getUTCMonth()] + ' ' + firstBucket.getUTCFullYear();
+      }
+      let deltaText, deltaClass;
+      if (openDelta > 0) {
+        deltaText = '↑ ' + openDelta + ' ' + sinceLabel;
+        deltaClass = 'negative';
+      } else if (openDelta < 0) {
+        deltaText = '↓ ' + Math.abs(openDelta) + ' ' + sinceLabel;
+        deltaClass = 'positive';
+      } else {
+        deltaText = '→ unchanged ' + sinceLabel;
+        deltaClass = '';
+      }
+
+      const sameYear = minDate.getUTCFullYear() === maxDate.getUTCFullYear();
+      const dateRangeLabel = (sameYear ? formatMonDay(minDate) : formatMonDayYear(minDate)) +
+        ' – ' + formatMonDayYear(maxDate);
+      const fmt = function (n) { return n.toLocaleString('en-US'); };
+
+      // Build DOM
+      root.innerHTML = '';
+      root.insertAdjacentHTML('beforeend',
+        '<div class="header-row">' +
+          '<div>' +
+            '<div class="eyebrow">Incidents management</div>' +
+            '<h1 class="title">Incidents over time</h1>' +
+            '<div class="date-range">' + escapeHtml(dateRangeLabel) + '</div>' +
+          '</div>' +
+          '<div class="chips">' +
+            '<div class="chip"><span class="chip-label">Time frame</span><span class="chip-value">Last ' + numDays + ' days</span></div>' +
+            '<div class="chip"><span class="chip-label">Resolution</span><span class="chip-value">' + escapeHtml(bucketLabel) + '</span></div>' +
+            '<div class="chip"><span class="chip-label">Time scope</span><span class="chip-value">Created</span></div>' +
+            '<div class="chip"><span class="chip-label">Stack by</span><span class="chip-value">State</span></div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="kpi-row">' +
+          '<div class="card kpi">' +
+            '<div class="kpi-label">Created (' + numDays + 'd)</div>' +
+            '<div class="kpi-value">' + fmt(totalCreated) + '</div>' +
+            '<div class="kpi-sub">~' + avgDaily.toFixed(1) + '/day average</div>' +
+          '</div>' +
+          '<div class="card kpi">' +
+            '<div class="kpi-label">Resolved or Closed (' + numDays + 'd)</div>' +
+            '<div class="kpi-value">' + fmt(resolvedInPeriod) + '</div>' +
+            (totalCreated ? '<div class="kpi-sub">' + Math.round(resolutionRate) + '% of created</div>' : '') +
+          '</div>' +
+          '<div class="card kpi">' +
+            '<div class="kpi-label">Open backlog</div>' +
+            '<div class="kpi-value">' + fmt(currentOpen) + '</div>' +
+            '<div class="kpi-sub ' + deltaClass + '">' + escapeHtml(deltaText) + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="card chart-card">' +
+          '<h3 class="chart-title">Daily volume &amp; backlog</h3>' +
+          '<p class="chart-desc">Stacked bars show incidents created each ' + escapeHtml(bucketLabel.toLowerCase()) +
+            ', segmented by current state. The line tracks total open backlog at end of ' +
+            escapeHtml(bucketLabel.toLowerCase()) + '.</p>' +
+          '<div id="chart"></div>' +
+        '</div>'
+      );
+
+      // Plotly chart
+      const xValues = bucketStarts.map(formatDateOnly);
+      const traces = orderedStates.map(function (state) {
+        return {
+          type: 'bar',
+          x: xValues,
+          y: barData[state] || bucketStarts.map(function () { return 0; }),
+          name: state,
+          marker: { color: COLOR_MAP[state] || '#cbd5e1', line: { width: 0 } },
+          hovertemplate: '<b>' + state + '</b><br>%{y} incidents<extra></extra>'
+        };
+      });
+
+      traces.push({
+        type: 'scatter',
+        x: xValues,
+        y: totalOpen,
+        name: 'Total open backlog',
+        mode: 'lines+markers',
+        marker: { size: 9, color: LINE_COLOR, line: { width: 2, color: 'white' } },
+        line: { color: LINE_COLOR, width: 2.5, shape: 'spline', smoothing: 0.6 },
+        hovertemplate: '<b>Open backlog</b><br>%{y} incidents<extra></extra>',
+        yaxis: 'y2'
+      });
+
+      const layout = {
+        barmode: 'stack',
+        bargap: 0.35,
+        plot_bgcolor: 'white',
+        paper_bgcolor: 'white',
+        hovermode: 'x unified',
+        font: { family: 'Inter, system-ui, -apple-system, sans-serif', color: '#334155', size: 13 },
+        legend: {
+          orientation: 'h',
+          yanchor: 'top', y: -0.18,
+          xanchor: 'center', x: 0.5,
+          bgcolor: 'rgba(0,0,0,0)',
+          font: { size: 12, color: '#475569' },
+          itemsizing: 'constant'
+        },
+        margin: { l: 90, r: 90, t: 20, b: 80 },
+        annotations: [
+          {
+            text: 'Incidents created',
+            textangle: -90,
+            xref: 'paper', yref: 'paper',
+            x: -0.08, y: 0.5,
+            xanchor: 'center', yanchor: 'middle',
+            showarrow: false,
+            font: { size: 12, color: '#64748b' }
+          },
+          {
+            text: 'Open backlog',
+            textangle: 90,
+            xref: 'paper', yref: 'paper',
+            x: 1.08, y: 0.5,
+            xanchor: 'center', yanchor: 'middle',
+            showarrow: false,
+            font: { size: 12, color: '#0f172a' }
+          }
+        ],
+        height: 520,
+        hoverlabel: {
+          bgcolor: 'white',
+          bordercolor: '#e2e8f0',
+          font: { family: 'Inter, sans-serif', size: 12, color: '#0f172a' }
+        },
+        xaxis: {
+          type: 'date',
+          tickformat: tickFormat,
+          showgrid: false,
+          showline: true, linecolor: '#e2e8f0',
+          ticks: 'outside', tickcolor: '#e2e8f0', ticklen: 6,
+          tickfont: { color: '#64748b' }
+        },
+        yaxis: {
+          showgrid: true, gridcolor: '#f1f5f9',
+          zeroline: false, showline: false, ticks: '',
+          tickfont: { color: '#64748b' }
+        },
+        yaxis2: {
+          overlaying: 'y',
+          side: 'right',
+          showgrid: false, zeroline: false, showline: false, ticks: '',
+          tickfont: { color: '#0f172a' }
+        }
+      };
+
+      Plotly.newPlot('chart', traces, layout, { displayModeBar: false, responsive: true });
+    }
+  </script>
+</body>
+</html>
